@@ -1194,7 +1194,7 @@ class WordEmbeddingsKeyedVectors(BaseKeyedVectors):
             return score
 
     def evaluate_word_analogies(self, analogies, restrict_vocab=300000, case_insensitive=True,
-    dummy4unknown=False, topk=5, method='3CosAdd'):
+    dummy4unknown=False, topk=5, method='3CosAdd', search_solution=False):
         """Compute performance of the model on an analogy test set.
 
         This is modern variant of :meth:`~gensim.models.keyedvectors.WordEmbeddingsKeyedVectors.accuracy`, see
@@ -1227,6 +1227,9 @@ class WordEmbeddingsKeyedVectors(BaseKeyedVectors):
             Number of the top similar words we can consider for a successful prediction.
         method: str, by default equal to 3CosAdd.
             The name of the corresponding method for solving the analogies.
+        search_solution: bool, optional
+            If True - searches for solution in topk results.
+            Otherwise, takes the word with highest cosine similarity as solution.
 
         Returns
         -------
@@ -1249,7 +1252,7 @@ class WordEmbeddingsKeyedVectors(BaseKeyedVectors):
                 if section:
                     sections.append(section)
                     self._log_evaluate_word_analogies(section)
-                section = {'section': line.lstrip(': ').strip(), 'correct': [], 'incorrect': []}
+                section = {'section': line.lstrip(': ').strip(), 'correct': [], 'incorrect': [], 'oov': 0, 'samples': 0, 'error': 0}
             else:
                 if not section:
                     raise ValueError("Missing section header before line #%i in %s" % (line_no, analogies))
@@ -1262,8 +1265,10 @@ class WordEmbeddingsKeyedVectors(BaseKeyedVectors):
                     logger.info("Skipping invalid line #%i in %s", line_no, analogies)
                     continue
                 quadruplets_no += 1
+                section['samples'] += 1
                 if a not in ok_vocab or b not in ok_vocab or c not in ok_vocab or expected not in ok_vocab:
                     oov += 1
+                    section['oov'] += 1
                     if dummy4unknown:
                         logger.debug('Zero accuracy for line #%d with OOV words: %s', line_no, line.strip())
                         section['incorrect'].append((a, b, c, expected))
@@ -1285,17 +1290,27 @@ class WordEmbeddingsKeyedVectors(BaseKeyedVectors):
                     raise ValueError("Unknown method for the Evaluation on the Analogy test set...")
                 self.vocab = original_vocab
 
+                high_score = 0
                 for similar_word in sims:
+                    if not search_solution:
+                        if similar_word[1] < high_score:
+                            break
+                        else:
+                            high_score = similar_word[1]
+
                     predicted = similar_word[0].upper() if case_insensitive else similar_word[0]
                     if predicted in ok_vocab and predicted not in ignore:
                         if predicted != expected:
                             logger.debug("%s: expected %s, predicted %s", line.strip(), expected, predicted)
-                        break
+                        else:
+                            break
 
                 if predicted == expected:
                     section['correct'].append((a, b, c, expected))
                 else:
                     section['incorrect'].append((a, b, c, expected))
+                    if not search_solution:
+                        section['error'] += dot(matutils.unitvec(self.vectors[ok_vocab[predicted].index]), matutils.unitvec(self.vectors[ok_vocab[expected].index]))
         if section:
             # store the last section, too
             sections.append(section)
@@ -1305,9 +1320,11 @@ class WordEmbeddingsKeyedVectors(BaseKeyedVectors):
             'section': 'Total accuracy',
             'correct': list(chain.from_iterable(s['correct'] for s in sections)),
             'incorrect': list(chain.from_iterable(s['incorrect'] for s in sections)),
+            'error': sum([s['error'] for s in sections])
         }
-
         oov_ratio = float(oov) / quadruplets_no * 100
+        total['oov_ratio'] = oov_ratio
+        total['total_samples'] = quadruplets_no
         logger.info('Quadruplets with out-of-vocabulary words: %.1f%%', oov_ratio)
         if not dummy4unknown:
             logger.info(
